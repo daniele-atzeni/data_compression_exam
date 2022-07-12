@@ -1,11 +1,14 @@
 import tensorflow as tf
 from tensorflow import keras
-from transformers import BertConfig, TFBertForMaskedLM
+from transformers import BertConfig, TFBertForMaskedLM, BertTokenizer
+from datasets import load_dataset
 
 import numpy as np
 
 import os
+import sys
 import gc
+
 
 #-------- FUNCTIONS TO GET MODELS --------#
 
@@ -14,16 +17,38 @@ def get_BERT_model() -> keras.layers.Layer:
     model = TFBertForMaskedLM(config).from_pretrained('bert-base-uncased')
     return model
 
-def get_RNN_model() -> keras.layers.Layer:
-    pass
-
 def get_model(model_type:str) -> keras.layers.Layer:
     if model_type == 'BERT':
         return get_BERT_model()
-    if model_type == 'RNN':
-        return get_RNN_model()
-    else:
-        raise ValueError('Unknown model type: {}'.format(model_type))
+    raise ValueError('Unknown model type: {}'.format(model_type))
+
+def get_representative_dataset(model_type:str, filename:str):
+    repr_dataset_size = 100
+    if model_type == 'BERT':
+        dataset = load_dataset("rotten_tomatoes", split="test") # each element is a dict, the text is in the 'text' key 
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased",
+                                                  return_tensors='np')
+        inputs = [tokenizer.encode_plus(x['text']) for x in dataset]
+        '''
+        required_dim = 1  # the required dimension is 130 ==> padding and truncation
+        for i, el in enumerate(inputs):  
+            if el.shape[0] > required_dim:
+                inputs[i] = el[:required_dim]
+            elif el.shape[0] < required_dim:
+                inputs[i] = np.pad(el, (0, required_dim - el.shape[0]), 'constant')
+        '''
+        def representative_dataset_gen():
+            for x in inputs[:repr_dataset_size]:
+                yield [np.array(el) for _, el in x.items()]
+        return representative_dataset_gen
+
+    if model_type in {'RNN', 'clustered_RNN'}:
+        data = np.load(filename)
+        def representative_data_gen():
+            for i in np.random.permutation(np.arange(data.shape[0]))[:repr_dataset_size]:
+                yield [data[i].reshape((1, -1, 1)).astype('float32')]
+        return representative_data_gen
+    raise ValueError('Unknown model type: {}'.format(model_type))
 
 
 #-------- FUNCTIONS TO CONVERT MODELS --------#
@@ -85,8 +110,9 @@ def config_converter(converter:tf.lite.TFLiteConverter, method:str, representati
 def main()-> None:
 
     #------------------ ONLY CHANGE THESE VARIABLES ------------------#
-    MODEL_TYPE = 'RNN'  # 'BERT', 'RNN', TODO 'RNN_CLUST' or 'BERT_CLUST'
-    CONVERSION_METHOD = 'float16'
+    #MODEL_TYPE = 'clustered_RNN'  # 'BERT', 'RNN', 'clustered_RNN' TODO 'BERT_CLUST'
+    MODEL_TYPE = sys.argv[1]
+    #CONVERSION_METHOD = 'int'
     ''' CONVERTION OPTIONS:
     float32
     float16
@@ -94,13 +120,18 @@ def main()-> None:
     float_fallback
     integer_only
     '''
-    CSV = True
+    CONVERSION_METHOD = sys.argv[2]
+    #CSV = True
+    CSV = True if len(sys.argv) < 4 else bool(sys.argv[3])
     #-----------------------------------------------------------------#
     # Managing folders
     model_type_path = os.path.join('models', MODEL_TYPE)
     base_model_path = os.path.join(model_type_path, 'base_model')
     if not os.path.exists(base_model_path):
         os.makedirs(base_model_path)
+    
+    data_path = os.path.join('data', MODEL_TYPE)
+    data_filename = os.path.join(data_path, 'data.npy')
 
     converted_model_path = os.path.join(model_type_path, CONVERSION_METHOD)
     if not os.path.exists(converted_model_path):
@@ -111,9 +142,14 @@ def main()-> None:
         os.makedirs(parameters_path)
 
     # Save base model
-    if not os.path.exists(base_model_path):
+    if not os.path.exists(os.path.join(base_model_path, 'saved_model.pb')):
         print('Getting model...')
         model = get_model(MODEL_TYPE)
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        print()
+        print()
+        inputs = tokenizer.encode_plus('Hello world', truncation = True, padding = "max_length", return_tensors='np')
+        print(model(**inputs))
         # save the model as recommended by tflite (https://www.tensorflow.org/lite/models/convert)
         model.save(base_model_path)
 
@@ -124,7 +160,15 @@ def main()-> None:
     
     print('Converter initialization and setup...')
     converter = tf.lite.TFLiteConverter.from_saved_model(base_model_path)
-    converter = config_converter(converter, CONVERSION_METHOD)
+    if CONVERSION_METHOD in {'float_fallback', 'integer_only'}:
+        representative_dataset = get_representative_dataset(MODEL_TYPE, data_filename)
+    else:
+        representative_dataset = None
+    converter = config_converter(converter, CONVERSION_METHOD, representative_dataset)
+    if 'clustered' in MODEL_TYPE:
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
+        converter._experimental_lower_tensor_list_ops = False
+
     print(f'Converting model with {CONVERSION_METHOD}...')
     lite_model = converter.convert()
 
@@ -152,7 +196,7 @@ def main()-> None:
     tensor_details = interpreter.get_tensor_details()
     for j, i in enumerate([el['index'] for el in tensor_details]):
         if j >= len(interpreter.get_input_details()):   # don't save inputs
-            if not 'flatten' in tensor_details[j]['name'] and not 'output' in tensor_details[j]['name']:
+            if not 'flatten' in tensor_details[j]['name'] and not 'output' in tensor_details[j]['name'] and len(tensor_details[j]['shape']) != 0:
                 tensor = interpreter.tensor(i)().squeeze()
                 if len(tensor.shape) == 2:   # save just the matrices
                     print(f'Saving weight with index {i}, {j}-th of {len(tensor_details)-1}...')
