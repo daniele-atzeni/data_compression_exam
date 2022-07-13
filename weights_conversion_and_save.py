@@ -5,10 +5,15 @@ from datasets import load_dataset
 
 import numpy as np
 
+import argparse
+
 import os
 import sys
 import gc
 
+Description = """
+Tool to export quantised matrices in CSV format from NN models.
+"""
 
 #-------- FUNCTIONS TO GET MODELS --------#
 
@@ -108,22 +113,38 @@ def config_converter(converter:tf.lite.TFLiteConverter, method:str, representati
 
 # --------------------------------------------#
 
+def show_command_line(f):
+  f.write('=== Command line: ') 
+  for x in sys.argv:
+     f.write(x+' ')
+  f.write('\n')   
+
 def main()-> None:
 
-    #------------------ ONLY CHANGE THESE VARIABLES ------------------#
-    #MODEL_TYPE = 'clustered_RNN'  # 'BERT', 'RNN', 'clustered_RNN' TODO 'BERT_CLUST'
-    MODEL_TYPE = sys.argv[1]
-    #CONVERSION_METHOD = 'int'
-    ''' CONVERTION OPTIONS:
-    float32
-    float16
-    int
-    float_fallback
-    integer_only
-    '''
-    CONVERSION_METHOD = sys.argv[2]
-    #CSV = True
-    CSV = True if len(sys.argv) < 4 else bool(sys.argv[3])
+    show_command_line(sys.stderr)
+
+    models = ['BERT', 'RNN', 'clustered_RNN'] #TODO 'BERT_CLUST'
+    conv_methods = ['float32', 'float16', 'int', 'float_fallback', 'integer_only']
+
+    parser = argparse.ArgumentParser(description=Description, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('model', help='model type: ' + '|'.join(models), type=str)
+    parser.add_argument('conv', help='converttion options: ' + '|'.join(conv_methods), type=str)
+    parser.add_argument('--csv', help='csv format (default: True)', default=True, type=bool)
+    args = parser.parse_args()
+
+    MODEL_TYPE = args.model 
+
+    if MODEL_TYPE not in models : 
+        print('model type must be', '|'.join(models), file=sys.stderr)
+        sys.exit(1)
+
+    CONVERSION_METHOD = args.conv
+    if CONVERSION_METHOD not in conv_methods : 
+        print('conv must be', '|'.join(conv_methods), file=sys.stderr)
+        sys.exit(2)
+
+    CSV = args.csv
+
     #-----------------------------------------------------------------#
     # Managing folders
     model_type_path = os.path.join('models', MODEL_TYPE)
