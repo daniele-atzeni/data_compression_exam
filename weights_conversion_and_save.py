@@ -28,18 +28,19 @@ def get_representative_dataset(model_type:str, filename:str):
         dataset = load_dataset("rotten_tomatoes", split="test") # each element is a dict, the text is in the 'text' key 
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased",
                                                   return_tensors='np')
-        inputs = [tokenizer.encode_plus(x['text']) for x in dataset]
-        '''
-        required_dim = 1  # the required dimension is 130 ==> padding and truncation
+        inputs = [tokenizer.encode_plus(x['text'])['input_ids'] for x in dataset]   # dataset contains dictionaries # tokenizer returns dictionaries
+        inputs = [np.array(x).astype('int32') for x in inputs]
+        required_dim = 5  # ==> padding and truncation
         for i, el in enumerate(inputs):  
             if el.shape[0] > required_dim:
                 inputs[i] = el[:required_dim]
             elif el.shape[0] < required_dim:
                 inputs[i] = np.pad(el, (0, required_dim - el.shape[0]), 'constant')
-        '''
+        
+        inputs = [el.reshape((1, -1)) for el in inputs]
         def representative_dataset_gen():
             for x in inputs[:repr_dataset_size]:
-                yield [np.array(el) for _, el in x.items()]
+                yield [x]
         return representative_dataset_gen
 
     if model_type in {'RNN', 'clustered_RNN'}:
